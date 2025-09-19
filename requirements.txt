@@ -3,3 +3,27 @@ jupyter
 pandas
 numpy
 requests
+# Core web framework
+streamlit
+
+# LangChain ecosystem
+langchain
+langchain-community
+langchain-core
+langchain-google-genai
+langchain-xai
+
+# Embeddings and Vector DB
+faiss-cpu
+sentence-transformers
+
+# File handling and environment
+openpyxl
+python-dotenv
+pandas
+
+# For tunneling (optional in Railway, remove if not needed)
+pyngrok
+
+# Other essentials
+tiktoken
