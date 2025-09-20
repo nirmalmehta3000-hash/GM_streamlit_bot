@@ -12,11 +12,11 @@ from mysql.connector import Error
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MYSQL_HOST = os.environ.get("MYSQL_HOST")
-MYSQL_PORT = int(os.environ.get("MYSQL_PORT", 3306))
-MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE")
-MYSQL_USER = os.environ.get("MYSQL_USER")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
+MYSQL_HOST = os.environ.get("MYSQLHOST")
+MYSQL_PORT = int(os.environ.get("MYSQLPORT", 3306))
+MYSQL_DATABASE = os.environ.get("MYSQLDATABASE")
+MYSQL_USER = os.environ.get("MYSQLUSER")
+MYSQL_PASSWORD = os.environ.get("MYSQLPASSWORD")
 
 
 def _env_ok():
