@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import pandas as pd
 from datetime import datetime
-import mysql.connector # Import mysql.connector
+import mysql.connector  # Import mysql.connector
 
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -14,11 +14,14 @@ from langchain_core.prompts import PromptTemplate
 from langchain.chains.llm import LLMChain
 from langchain.chains.combine_documents.stuff import StuffDocumentsChain
 
+# Import database utility functions from db_utils.py
+from db_utils import create_chat_history_table, save_chat_entry_to_db
+
 # Import LLM models (if you intend to use Grok)
 try:
     from langchain_xai import ChatXAI
 except ImportError:
-    ChatXAI = None # Handle case where langchain_xai is not installed
+    ChatXAI = None  # Handle case where langchain_xai is not installed
 
 # Access API keys from environment variables
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -31,7 +34,7 @@ MYSQL_USER = os.environ.get("MYSQL_USER")
 MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
 
 VECTOR_DB_PATH = "vectorstore.faiss"
-DATASET_PATH = "dataset.xlsx" # Make sure this file is uploaded in /content
+DATASET_PATH = "dataset.xlsx"  # Make sure this file is uploaded in /content
 
 # Expert system instruction (shared)
 SYSTEM_INSTRUCTION = (
@@ -52,81 +55,6 @@ If you don't know the answer, just say so honestly and avoid guessing.
 Question: {question}
 Expert Answer:
 """
-
-# ============================================
-# DATABASE FUNCTIONS
-# ============================================
-def get_db_connection():
-    """Establishes a connection to the MySQL database using environment variables."""
-    try:
-        conn = mysql.connector.connect(
-            host=MYSQL_HOST,
-            database=MYSQL_DATABASE,
-            user=MYSQL_USER,
-            password=MYSQL_PASSWORD
-        )
-        print("Database connection established successfully.")
-        return conn
-    except mysql.connector.Error as err:
-        st.error(f"Error connecting to the database: {err}")
-        print(f"Error connecting to the database: {err}")
-        return None
-
-def create_chat_history_table():
-    """Creates the chat_history table in the MySQL database if it doesn't exist."""
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_connection()
-        if conn is not None:
-            cursor = conn.cursor()
-            create_table_query = """
-            CREATE TABLE IF NOT EXISTS chat_history (
-                name VARCHAR(255),
-                timestamp DATETIME,
-                email VARCHAR(255),
-                user_question TEXT,
-                assistant_answer TEXT
-            )
-            """
-            cursor.execute(create_table_query)
-            conn.commit()
-            print("Chat history table created or already exists.")
-    except mysql.connector.Error as err:
-        st.error(f"Error creating chat history table: {err}")
-        print(f"Error creating chat history table: {err}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-def save_chat_entry_to_db(timestamp, name, email, user_question, assistant_answer):
-    """Saves a single chat entry (user question and assistant answer) to the database."""
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_connection()
-        if conn is not None:
-            cursor = conn.cursor()
-            insert_query = """
-            INSERT INTO chat_history (name, timestamp, email, user_question, assistant_answer)
-            VALUES (%s, %s, %s, %s, %s)
-            """
-            data = (name, timestamp, email, user_question, assistant_answer)
-            cursor.execute(insert_query, data)
-            conn.commit()
-            print("Chat entry saved to database.")
-        else:
-            print("Could not save chat entry: Database connection failed.")
-    except mysql.connector.Error as err:
-        st.error(f"Error saving chat entry to database: {err}")
-        print(f"Error saving chat entry to database: {err}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 # ============================================
 # OTHER FUNCTIONS
@@ -165,7 +93,7 @@ def get_qa_chain(llm):
     if vectorstore is None:
         st.error("Could not load or create knowledgebase.")
         return None
-    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k":3})
+    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 3})
     prompt = PromptTemplate.from_template(PROMPT_TEMPLATE)
 
     llm_chain = LLMChain(llm=llm, prompt=prompt)
@@ -217,7 +145,7 @@ def run_app():
                 st.session_state.user_name = name
                 st.session_state.user_email = email
                 st.session_state.user_info_collected = True
-                st.rerun() # Rerun to hide the input fields
+                st.rerun()  # Rerun to hide the input fields
 
     if st.session_state.user_info_collected:
         st.write(f"Welcome, {st.session_state.user_name}!")
@@ -229,7 +157,7 @@ def run_app():
             llm = None
             if llm_choice == "gemini":
                 if not GOOGLE_API_KEY:
-                     st.error("Google API Key not found. Please set the GOOGLE_API_KEY environment variable.")
+                    st.error("Google API Key not found. Please set the GOOGLE_API_KEY environment variable.")
                 else:
                     try:
                         llm = GoogleGenerativeAI(
@@ -241,32 +169,32 @@ def run_app():
                         st.error(f"Error initializing Gemini model: {e}.")
                         print(f"Error initializing Gemini model: {e}")
             elif llm_choice == "grok" and ChatXAI and GROK_API_KEY:
-                 try:
+                try:
                     llm = ChatXAI(
                         model="grok-4",
                         temperature=0.3,
                         xai_api_key=GROK_API_KEY,
                     )
-                 except Exception as e:
-                     st.error(f"Error initializing Grok model: {e}. Falling back to Gemini.")
-                     print(f"Error initializing Grok model: {e}. Falling back to Gemini.")
-                     llm_choice = "gemini"
-                     if not GOOGLE_API_KEY:
-                          st.error("Google API Key not found for fallback. Please set the GOOGLE_API_KEY environment variable.")
-                     else:
-                         try:
-                             llm = GoogleGenerativeAI(
+                except Exception as e:
+                    st.error(f"Error initializing Grok model: {e}. Falling back to Gemini.")
+                    print(f"Error initializing Grok model: {e}. Falling back to Gemini.")
+                    llm_choice = "gemini"
+                    if not GOOGLE_API_KEY:
+                        st.error("Google API Key not found for fallback. Please set the GOOGLE_API_KEY environment variable.")
+                    else:
+                        try:
+                            llm = GoogleGenerativeAI(
                                 model="gemini-1.5-flash-latest",
                                 temperature=0.3,
                                 google_api_key=GOOGLE_API_KEY,
                             )
-                         except Exception as gemini_e:
-                             st.error(f"Error initializing fallback Gemini model: {gemini_e}.")
-                             print(f"Error initializing fallback Gemini model: {gemini_e}")
-                             llm = None
-            else: # Fallback to Gemini
+                        except Exception as gemini_e:
+                            st.error(f"Error initializing fallback Gemini model: {gemini_e}.")
+                            print(f"Error initializing fallback Gemini model: {gemini_e}")
+                            llm = None
+            else:  # Fallback to Gemini
                 if llm_choice == "grok":
-                     st.warning("Grok model selected but langchain_xai is not available or API key is missing. Using Gemini instead.")
+                    st.warning("Grok model selected but langchain_xai is not available or API key is missing. Using Gemini instead.")
                 llm_choice = "gemini"
                 if not GOOGLE_API_KEY:
                     st.error("Google API Key not found for fallback. Please set the GOOGLE_API_KEY environment variable.")
@@ -285,7 +213,7 @@ def run_app():
             if llm:
                 qa_chain = get_qa_chain(llm)
                 if qa_chain:
-                    with st.spinner(f"Using {llm_choice.title()} model to answer..."): 
+                    with st.spinner(f"Using {llm_choice.title()} model to answer..."):
                         try:
                             response = qa_chain.invoke({"query": question})
                             answer = response.get("result", "Could not get an answer from the model.")
@@ -294,7 +222,7 @@ def run_app():
                             st.error(answer)
                             print(f"Error during QA chain invocation: {e}")
                 else:
-                     answer = "Sorry, I could not load the knowledge base to answer your question."
+                    answer = "Sorry, I could not load the knowledge base to answer your question."
 
                 st.session_state.chat_history.append(("user", question))
                 st.session_state.chat_history.append(("assistant", answer))
@@ -309,18 +237,18 @@ def run_app():
                 )
 
             else:
-                 st.session_state.chat_history.append(("user", question))
-                 st.session_state.chat_history.append(("assistant", "Sorry, I encountered an issue with the language model and cannot answer your question at this time. Please ensure your API keys are correctly set."))
+                st.session_state.chat_history.append(("user", question))
+                st.session_state.chat_history.append(("assistant", "Sorry, I encountered an issue with the language model and cannot answer your question at this time. Please ensure your API keys are correctly set."))
 
-                 # Attempt to save the user query even if LLM failed
-                 # Note: assistant_answer will be the error message in this case
-                 save_chat_entry_to_db(
-                     st.session_state.session_timestamp,
-                     st.session_state.user_name,
-                     st.session_state.user_email,
-                     question,
-                     "LLM failed to respond." # Or the actual error message if captured
-                 )
+                # Attempt to save the user query even if LLM failed
+                # Note: assistant_answer will be the error message in this case
+                save_chat_entry_to_db(
+                    st.session_state.session_timestamp,
+                    st.session_state.user_name,
+                    st.session_state.user_email,
+                    question,
+                    "LLM failed to respond."  # Or the actual error message if captured
+                )
 
         # Display chat history
         for sender, text in st.session_state.chat_history:
@@ -337,8 +265,7 @@ create_chat_history_table()
 print("Attempting to create vector database...")
 try:
     df = pd.read_excel(DATASET_PATH)
-    # It's fine if this errors if the vector db exists
-    # create_vector_db(df) # Not needed here if already created
+    # create_vector_db(df) # This call is not required if vector DB already exists.
 except FileNotFoundError:
     print(f"Dataset not found at {DATASET_PATH}. Please upload it.")
 except Exception as e:
