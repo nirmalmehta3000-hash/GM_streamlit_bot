@@ -3,6 +3,7 @@ import os
 import pandas as pd
 from datetime import datetime
 import mysql.connector  # Import mysql.connector
+from mysql.connector import errorcode
 
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -14,8 +15,12 @@ from langchain_core.prompts import PromptTemplate
 from langchain.chains.llm import LLMChain
 from langchain.chains.combine_documents.stuff import StuffDocumentsChain
 
-# Import database utility functions from db_utils.py
-from db_utils import create_chat_history_table, save_chat_entry_to_db
+# Try importing user db_utils; if unavailable, we'll define local functions that use env vars.
+try:
+    from db_utils import create_chat_history_table, save_chat_entry_to_db
+except Exception:
+    create_chat_history_table = None
+    save_chat_entry_to_db = None
 
 # Import LLM models (if you intend to use Grok)
 try:
@@ -32,6 +37,7 @@ MYSQL_HOST = os.environ.get("MYSQL_HOST")
 MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE")
 MYSQL_USER = os.environ.get("MYSQL_USER")
 MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", 3306))
 
 VECTOR_DB_PATH = "vectorstore.faiss"
 DATASET_PATH = "dataset.xlsx"  # Make sure this file is uploaded in /content
@@ -57,6 +63,105 @@ Expert Answer:
 """
 
 # ============================================
+# DATABASE HELPERS (fallback if db_utils not provided)
+# ============================================
+def get_db_connection():
+    """
+    Create and return a new connection using env vars.
+    Caller must close the connection.
+    """
+    if not (MYSQL_HOST and MYSQL_DATABASE and MYSQL_USER and MYSQL_PASSWORD):
+        raise EnvironmentError("MySQL credentials are missing. Please set MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER and MYSQL_PASSWORD environment variables.")
+    return mysql.connector.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+        autocommit=False
+    )
+
+def _create_chat_history_table_local():
+    """
+    Create chat_history table if it doesn't exist.
+    """
+    create_table_sql = """
+    CREATE TABLE IF NOT EXISTS chat_history (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        session_timestamp DATETIME,
+        user_name VARCHAR(255),
+        user_email VARCHAR(255),
+        user_question TEXT,
+        assistant_answer LONGTEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(create_table_sql)
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[DB] Error creating chat_history table: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+def _save_chat_entry_to_db_local(session_ts, user_name, user_email, question, assistant_answer):
+    """
+    Save a chat entry to DB. Returns True if inserted successfully, else False.
+    """
+    insert_sql = """
+    INSERT INTO chat_history (session_timestamp, user_name, user_email, user_question, assistant_answer)
+    VALUES (%s, %s, %s, %s, %s)
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Convert session timestamp to datetime if it's a string
+        if isinstance(session_ts, str):
+            try:
+                session_ts_dt = datetime.strptime(session_ts, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                # fallback: use current time if parsing fails
+                session_ts_dt = datetime.now()
+        else:
+            session_ts_dt = session_ts
+
+        cur.execute(insert_sql, (session_ts_dt, user_name, user_email, question, assistant_answer))
+        if cur.rowcount != 1:
+            raise Exception(f"Insert affected {cur.rowcount} rows")
+        conn.commit()
+        cur.close()
+        return True
+    except mysql.connector.Error as db_err:
+        if conn:
+            conn.rollback()
+        print(f"[DB] MySQL error: {db_err}")
+        return False
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[DB] Error inserting chat entry: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+# If db_utils didn't provide implementations, use local ones
+if create_chat_history_table is None:
+    create_chat_history_table = _create_chat_history_table_local
+if save_chat_entry_to_db is None:
+    save_chat_entry_to_db = _save_chat_entry_to_db_local
+
+# ============================================
 # OTHER FUNCTIONS
 # ============================================
 def create_vector_db():
@@ -69,7 +174,7 @@ def create_vector_db():
         st.error(f"Error reading dataset file: {e}")
         return None
 
-    documents = [Document(page_content=f"Q: {row['prompt']}\nA: {row['response']}") for _, row in df.iterrows()]
+    documents = [Document(page_content=f"Q: {row.get('prompt','')}\nA: {row.get('response','')}") for _, row in df.iterrows()]
     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
     texts = text_splitter.split_documents(documents)
     embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -132,6 +237,10 @@ def run_app():
         st.session_state.user_email = ""
     if "session_timestamp" not in st.session_state:
         st.session_state.session_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Show DB warning if credentials are missing
+    if not (MYSQL_HOST and MYSQL_DATABASE and MYSQL_USER and MYSQL_PASSWORD):
+        st.warning("MySQL environment variables are not fully set. Chats will NOT be saved until MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER and MYSQL_PASSWORD are configured.")
 
     # Collect user info if not already collected
     if not st.session_state.user_info_collected:
@@ -210,6 +319,7 @@ def run_app():
                         print(f"Error initializing fallback Gemini model: {e}")
                         llm = None
 
+            answer = "Sorry, I could not get an answer from the model."
             if llm:
                 qa_chain = get_qa_chain(llm)
                 if qa_chain:
@@ -223,32 +333,30 @@ def run_app():
                             print(f"Error during QA chain invocation: {e}")
                 else:
                     answer = "Sorry, I could not load the knowledge base to answer your question."
+            else:
+                answer = "Sorry, I encountered an issue with the language model and cannot answer your question at this time. Please ensure your API keys are correctly set."
 
-                st.session_state.chat_history.append(("user", question))
-                st.session_state.chat_history.append(("assistant", answer))
+            st.session_state.chat_history.append(("user", question))
+            st.session_state.chat_history.append(("assistant", answer))
 
-                # Save chat history entry to the database
-                save_chat_entry_to_db(
+            # Save chat history entry to the database (best effort)
+            try:
+                saved = save_chat_entry_to_db(
                     st.session_state.session_timestamp,
                     st.session_state.user_name,
                     st.session_state.user_email,
                     question,
                     answer
                 )
-
-            else:
-                st.session_state.chat_history.append(("user", question))
-                st.session_state.chat_history.append(("assistant", "Sorry, I encountered an issue with the language model and cannot answer your question at this time. Please ensure your API keys are correctly set."))
-
-                # Attempt to save the user query even if LLM failed
-                # Note: assistant_answer will be the error message in this case
-                save_chat_entry_to_db(
-                    st.session_state.session_timestamp,
-                    st.session_state.user_name,
-                    st.session_state.user_email,
-                    question,
-                    "LLM failed to respond."  # Or the actual error message if captured
-                )
+                if saved:
+                    st.info("Chat saved to database.")
+                else:
+                    st.warning("Failed to save chat to database. Check logs or DB credentials.")
+            except EnvironmentError as env_err:
+                st.warning(f"Database not configured: {env_err}")
+            except Exception as e:
+                st.error(f"Unexpected error saving to DB: {e}")
+                print(f"[DB] Unexpected error saving to DB: {e}")
 
         # Display chat history
         for sender, text in st.session_state.chat_history:
@@ -258,16 +366,24 @@ def run_app():
 # ============================================
 # INITIAL SETUP (OUTSIDE STREAMLIT)
 # ============================================
-# Create the database table when the script starts
-create_chat_history_table()
+# Create the database table when the script starts (best-effort)
+try:
+    ok = create_chat_history_table()
+    if not ok:
+        print("Warning: Could not create chat_history table automatically.")
+except EnvironmentError as env_e:
+    print(f"MySQL env not configured: {env_e}")
+except Exception as e:
+    print(f"Error creating chat_history table: {e}")
 
 # Create the vector database outside the Streamlit app logic
-print("Attempting to create vector database...")
+print("Attempting to create vector database (if dataset exists)...")
 try:
-    df = pd.read_excel(DATASET_PATH)
-    # create_vector_db(df) # This call is not required if vector DB already exists.
-except FileNotFoundError:
-    print(f"Dataset not found at {DATASET_PATH}. Please upload it.")
+    if os.path.exists(DATASET_PATH):
+        # create_vector_db() will run inside Streamlit if needed; no forced run here.
+        pass
+    else:
+        print(f"Dataset not found at {DATASET_PATH}. Please upload it.")
 except Exception as e:
     print(f"Error reading dataset file: {e}")
 
