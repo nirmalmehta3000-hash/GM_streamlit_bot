@@ -27,3 +27,6 @@ pyngrok
 
 # Other essentials
 tiktoken
+
+# Added missing requirement
+mysql-connector-python
