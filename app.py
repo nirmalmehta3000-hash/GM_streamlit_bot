@@ -33,11 +33,11 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GROK_API_KEY = os.environ.get("GROK_API_KEY")
 
 # Database credentials from environment variables
-MYSQL_HOST = os.environ.get("MYSQL_HOST")
-MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE")
-MYSQL_USER = os.environ.get("MYSQL_USER")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD")
-MYSQL_PORT = int(os.environ.get("MYSQL_PORT", 3306))
+MYSQL_HOST = os.environ.get("MYSQLHOST")
+MYSQL_DATABASE = os.environ.get("MYSQLDATABASE")
+MYSQL_USER = os.environ.get("MYSQLUSER")
+MYSQL_PASSWORD = os.environ.get("MYSQLPASSWORD")
+MYSQL_PORT = int(os.environ.get("MYSQLPORT", 3306))
 
 VECTOR_DB_PATH = "vectorstore.faiss"
 DATASET_PATH = "dataset.xlsx"  # Make sure this file is uploaded in /content
@@ -225,7 +225,7 @@ def determine_llm(question: str):
 def run_app():
     st.set_page_config(page_title="Gerryson Mehta Multi-LLM Chatbot", page_icon="🤖")
     st.title("Gerryson Mehta's Chatbot 🤖")
-    st.write("Powered by Google Gemini and Grok AI")
+    st.write("Powered by Analytix Leap")
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
