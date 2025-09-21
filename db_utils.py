@@ -55,10 +55,10 @@ def create_chat_history_table():
         name VARCHAR(255),
         session_timestamp DATETIME,
         email VARCHAR(255),
-        user_mobile VARCHAR(20),
         user_question TEXT,
         assistant_answer LONGTEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        user_mobile VARCHAR(20)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """
     cur = None
@@ -80,18 +80,17 @@ def create_chat_history_table():
         conn.close()
 
 
-def save_chat_entry_to_db(session_timestamp, name, email, user_mobile, user_question, assistant_answer):
+def save_chat_entry_to_db(session_timestamp, name, email, user_question, assistant_answer, user_mobile):
     """
-    Insert a chat entry including user_mobile. Returns True if inserted successfully, False otherwise.
-    session_timestamp can be a datetime or a string in 'YYYY-MM-DD HH:MM:SS' format.
+    Insert a chat entry including user_mobile at the very end (after created_at)
     """
     conn = get_db_connection()
     if not conn:
         return False
 
     insert_sql = """
-    INSERT INTO chat_history (session_timestamp, name, email, user_mobile, user_question, assistant_answer)
-    VALUES (%s, %s, %s, %s, %s, %s)
+    INSERT INTO chat_history (session_timestamp, name, email, user_question, assistant_answer, created_at, user_mobile)
+    VALUES (%s, %s, %s, %s, %s, NOW(), %s)
     """
     cur = None
     try:
@@ -106,11 +105,7 @@ def save_chat_entry_to_db(session_timestamp, name, email, user_mobile, user_ques
             ts = datetime.now()
 
         cur = conn.cursor()
-        cur.execute(insert_sql, (ts, name, email, user_mobile, user_question, assistant_answer))
-
-        if cur.rowcount != 1:
-            logger.warning("Insert affected %s rows", cur.rowcount)
-
+        cur.execute(insert_sql, (ts, name, email, user_question, assistant_answer, user_mobile))
         conn.commit()
         return True
     except Error as err:
@@ -127,9 +122,6 @@ def save_chat_entry_to_db(session_timestamp, name, email, user_mobile, user_ques
 
 
 def test_connection():
-    """
-    Handy helper to test DB connectivity. Returns True if SELECT 1 works.
-    """
     conn = get_db_connection()
     if not conn:
         return False
