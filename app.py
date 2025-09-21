@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import pandas as pd
 from datetime import datetime
-import mysql.connector  # Import mysql.connector
+import mysql.connector
 from mysql.connector import errorcode
 
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -15,24 +15,24 @@ from langchain_core.prompts import PromptTemplate
 from langchain.chains.llm import LLMChain
 from langchain.chains.combine_documents.stuff import StuffDocumentsChain
 
-# Try importing user db_utils; if unavailable, we'll define local functions that use env vars.
+# Try importing user db_utils; fallback to local functions
 try:
     from db_utils import create_chat_history_table, save_chat_entry_to_db
 except Exception:
     create_chat_history_table = None
     save_chat_entry_to_db = None
 
-# Import LLM models (if you intend to use Grok)
+# Import Grok if available
 try:
     from langchain_xai import ChatXAI
 except ImportError:
-    ChatXAI = None  # Handle case where langchain_xai is not installed
+    ChatXAI = None
 
-# Access API keys from environment variables
+# API Keys
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GROK_API_KEY = os.environ.get("GROK_API_KEY")
 
-# Database credentials from environment variables
+# Database credentials
 MYSQL_HOST = os.environ.get("MYSQLHOST")
 MYSQL_DATABASE = os.environ.get("MYSQLDATABASE")
 MYSQL_USER = os.environ.get("MYSQLUSER")
@@ -40,9 +40,9 @@ MYSQL_PASSWORD = os.environ.get("MYSQLPASSWORD")
 MYSQL_PORT = int(os.environ.get("MYSQLPORT", 3306))
 
 VECTOR_DB_PATH = "vectorstore.faiss"
-DATASET_PATH = "dataset.xlsx"  # Make sure this file is uploaded in /content
+DATASET_PATH = "dataset.xlsx"
 
-# Expert system instruction (shared)
+# System instruction
 SYSTEM_INSTRUCTION = (
     "You are a friendly, insightful customer service assistant for www.gerrysonmehta.com. "
     "Your expertise is helping aspiring data analysts, students, and professionals with career advice, project ideas, interview prep, portfolio building and time management. "
@@ -63,7 +63,7 @@ Expert Answer:
 """
 
 # ============================================
-# DATABASE HELPERS (fallback if db_utils not provided)
+# DATABASE HELPERS
 # ============================================
 def get_db_connection():
     if not (MYSQL_HOST and MYSQL_DATABASE and MYSQL_USER and MYSQL_PASSWORD):
@@ -84,9 +84,9 @@ def _create_chat_history_table_local():
         session_timestamp DATETIME,
         user_name VARCHAR(255),
         user_email VARCHAR(255),
-        user_mobile VARCHAR(20),
         user_question TEXT,
         assistant_answer LONGTEXT,
+        user_mobile VARCHAR(20),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """
@@ -107,9 +107,9 @@ def _create_chat_history_table_local():
         if conn:
             conn.close()
 
-def _save_chat_entry_to_db_local(session_ts, user_name, user_email, user_mobile, question, assistant_answer):
+def _save_chat_entry_to_db_local(session_ts, user_name, user_email, question, assistant_answer, user_mobile):
     insert_sql = """
-    INSERT INTO chat_history (session_timestamp, user_name, user_email, user_mobile, user_question, assistant_answer)
+    INSERT INTO chat_history (session_timestamp, user_name, user_email, user_question, assistant_answer, user_mobile)
     VALUES (%s, %s, %s, %s, %s, %s)
     """
     conn = None
@@ -124,7 +124,7 @@ def _save_chat_entry_to_db_local(session_ts, user_name, user_email, user_mobile,
         else:
             session_ts_dt = session_ts
 
-        cur.execute(insert_sql, (session_ts_dt, user_name, user_email, user_mobile, question, assistant_answer))
+        cur.execute(insert_sql, (session_ts_dt, user_name, user_email, question, assistant_answer, user_mobile))
         if cur.rowcount != 1:
             raise Exception(f"Insert affected {cur.rowcount} rows")
         conn.commit()
@@ -144,14 +144,14 @@ def _save_chat_entry_to_db_local(session_ts, user_name, user_email, user_mobile,
         if conn:
             conn.close()
 
-# If db_utils didn't provide implementations, use local ones
+# Use local functions if db_utils not provided
 if create_chat_history_table is None:
     create_chat_history_table = _create_chat_history_table_local
 if save_chat_entry_to_db is None:
     save_chat_entry_to_db = _save_chat_entry_to_db_local
 
 # ============================================
-# OTHER FUNCTIONS
+# VECTORSTORE / QA
 # ============================================
 def create_vector_db():
     if not os.path.exists(DATASET_PATH):
@@ -209,7 +209,7 @@ def determine_llm(question: str):
     return "gemini"
 
 # ============================================
-# STREAMLIT APP DEFINITION
+# STREAMLIT APP
 # ============================================
 def run_app():
     st.set_page_config(page_title="Gerryson Mehta Multi-LLM Chatbot", page_icon="🤖")
@@ -338,9 +338,9 @@ def run_app():
                     st.session_state.session_timestamp,
                     st.session_state.user_name,
                     st.session_state.user_email,
-                    st.session_state.user_mobile,
                     question,
-                    answer
+                    answer,
+                    st.session_state.user_mobile
                 )
                 if saved:
                     st.info("Chat saved to database.")
