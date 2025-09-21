@@ -44,6 +44,7 @@ def get_db_connection():
 def create_chat_history_table():
     """
     Ensure chat_history table exists. Returns True on success, False otherwise.
+    user_mobile is now the LAST column.
     """
     conn = get_db_connection()
     if not conn:
@@ -52,8 +53,8 @@ def create_chat_history_table():
     create_sql = """
     CREATE TABLE IF NOT EXISTS chat_history (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(255),
         session_timestamp DATETIME,
+        name VARCHAR(255),
         email VARCHAR(255),
         user_question TEXT,
         assistant_answer LONGTEXT,
@@ -82,7 +83,7 @@ def create_chat_history_table():
 
 def save_chat_entry_to_db(session_timestamp, name, email, user_question, assistant_answer, user_mobile):
     """
-    Insert a chat entry including user_mobile at the very end (after created_at)
+    Insert a chat entry including user_mobile as the last column.
     """
     conn = get_db_connection()
     if not conn:
