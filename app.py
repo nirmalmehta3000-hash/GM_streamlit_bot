@@ -66,10 +66,6 @@ Expert Answer:
 # DATABASE HELPERS (fallback if db_utils not provided)
 # ============================================
 def get_db_connection():
-    """
-    Create and return a new connection using env vars.
-    Caller must close the connection.
-    """
     if not (MYSQL_HOST and MYSQL_DATABASE and MYSQL_USER and MYSQL_PASSWORD):
         raise EnvironmentError("MySQL credentials are missing. Please set MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER and MYSQL_PASSWORD environment variables.")
     return mysql.connector.connect(
@@ -82,15 +78,13 @@ def get_db_connection():
     )
 
 def _create_chat_history_table_local():
-    """
-    Create chat_history table if it doesn't exist.
-    """
     create_table_sql = """
     CREATE TABLE IF NOT EXISTS chat_history (
         id INT AUTO_INCREMENT PRIMARY KEY,
         session_timestamp DATETIME,
         user_name VARCHAR(255),
         user_email VARCHAR(255),
+        user_mobile VARCHAR(20),
         user_question TEXT,
         assistant_answer LONGTEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -113,29 +107,24 @@ def _create_chat_history_table_local():
         if conn:
             conn.close()
 
-def _save_chat_entry_to_db_local(session_ts, user_name, user_email, question, assistant_answer):
-    """
-    Save a chat entry to DB. Returns True if inserted successfully, else False.
-    """
+def _save_chat_entry_to_db_local(session_ts, user_name, user_email, user_mobile, question, assistant_answer):
     insert_sql = """
-    INSERT INTO chat_history (session_timestamp, user_name, user_email, user_question, assistant_answer)
-    VALUES (%s, %s, %s, %s, %s)
+    INSERT INTO chat_history (session_timestamp, user_name, user_email, user_mobile, user_question, assistant_answer)
+    VALUES (%s, %s, %s, %s, %s, %s)
     """
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Convert session timestamp to datetime if it's a string
         if isinstance(session_ts, str):
             try:
                 session_ts_dt = datetime.strptime(session_ts, "%Y-%m-%d %H:%M:%S")
             except Exception:
-                # fallback: use current time if parsing fails
                 session_ts_dt = datetime.now()
         else:
             session_ts_dt = session_ts
 
-        cur.execute(insert_sql, (session_ts_dt, user_name, user_email, question, assistant_answer))
+        cur.execute(insert_sql, (session_ts_dt, user_name, user_email, user_mobile, question, assistant_answer))
         if cur.rowcount != 1:
             raise Exception(f"Insert affected {cur.rowcount} rows")
         conn.commit()
@@ -235,26 +224,31 @@ def run_app():
         st.session_state.user_name = ""
     if "user_email" not in st.session_state:
         st.session_state.user_email = ""
+    if "user_mobile" not in st.session_state:
+        st.session_state.user_mobile = ""
     if "session_timestamp" not in st.session_state:
         st.session_state.session_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Show DB warning if credentials are missing
     if not (MYSQL_HOST and MYSQL_DATABASE and MYSQL_USER and MYSQL_PASSWORD):
         st.warning("MySQL environment variables are not fully set. Chats will NOT be saved until MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER and MYSQL_PASSWORD are configured.")
 
-    # Collect user info if not already collected
     if not st.session_state.user_info_collected:
         with st.form("user_info_form"):
-            st.write("Please provide your name and email to start the chat.")
+            st.write("Please provide your details to start the chat.")
             name = st.text_input("Name")
             email = st.text_input("Email")
+            mobile = st.text_input("Mobile Number")
             submit_button = st.form_submit_button("Start Chat")
 
             if submit_button:
-                st.session_state.user_name = name
-                st.session_state.user_email = email
-                st.session_state.user_info_collected = True
-                st.rerun()  # Rerun to hide the input fields
+                if not mobile.isdigit() or len(mobile) < 10:
+                    st.error("❌ Please enter a valid mobile number")
+                else:
+                    st.session_state.user_name = name
+                    st.session_state.user_email = email
+                    st.session_state.user_mobile = mobile
+                    st.session_state.user_info_collected = True
+                    st.rerun()
 
     if st.session_state.user_info_collected:
         st.write(f"Welcome, {st.session_state.user_name}!")
@@ -301,7 +295,7 @@ def run_app():
                             st.error(f"Error initializing fallback Gemini model: {gemini_e}.")
                             print(f"Error initializing fallback Gemini model: {gemini_e}")
                             llm = None
-            else:  # Fallback to Gemini
+            else:
                 if llm_choice == "grok":
                     st.warning("Grok model selected but langchain_xai is not available or API key is missing. Using Gemini instead.")
                 llm_choice = "gemini"
@@ -339,12 +333,12 @@ def run_app():
             st.session_state.chat_history.append(("user", question))
             st.session_state.chat_history.append(("assistant", answer))
 
-            # Save chat history entry to the database (best effort)
             try:
                 saved = save_chat_entry_to_db(
                     st.session_state.session_timestamp,
                     st.session_state.user_name,
                     st.session_state.user_email,
+                    st.session_state.user_mobile,
                     question,
                     answer
                 )
@@ -358,15 +352,13 @@ def run_app():
                 st.error(f"Unexpected error saving to DB: {e}")
                 print(f"[DB] Unexpected error saving to DB: {e}")
 
-        # Display chat history
         for sender, text in st.session_state.chat_history:
             with st.chat_message(sender):
                 st.markdown(text)
 
 # ============================================
-# INITIAL SETUP (OUTSIDE STREAMLIT)
+# INITIAL SETUP
 # ============================================
-# Create the database table when the script starts (best-effort)
 try:
     ok = create_chat_history_table()
     if not ok:
@@ -376,11 +368,9 @@ except EnvironmentError as env_e:
 except Exception as e:
     print(f"Error creating chat_history table: {e}")
 
-# Create the vector database outside the Streamlit app logic
 print("Attempting to create vector database (if dataset exists)...")
 try:
     if os.path.exists(DATASET_PATH):
-        # create_vector_db() will run inside Streamlit if needed; no forced run here.
         pass
     else:
         print(f"Dataset not found at {DATASET_PATH}. Please upload it.")
