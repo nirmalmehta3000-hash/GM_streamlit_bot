@@ -3,18 +3,18 @@ import os
 import pandas as pd
 from datetime import datetime
 import mysql.connector
-from mysql.connector import errorcode
 import re
 
-# Updated LangChain imports
-from langchain_huggingface import HuggingFaceEmbeddings
+# LangChain imports - using stable versions to avoid errors
+from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain.chains import RetrievalQA
 from langchain_google_genai import GoogleGenerativeAI
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.docstore.document import Document
 from langchain_core.prompts import PromptTemplate
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.llm import LLMChain
+from langchain.chains.combine_documents.stuff import StuffDocumentsChain
 
 # Try importing user db_utils; fallback to local functions
 try:
@@ -52,7 +52,7 @@ SYSTEM_INSTRUCTION = (
     "Refer to Gerryson Mehta's philosophy and provide motivation as needed."
 )
 
-# Prompt template (works with both old and new LangChain)
+# Prompt template
 PROMPT_TEMPLATE = """
 Use the following pieces of context to answer the user's question.
 Respond conversationally, as a human expert coach.
@@ -108,17 +108,19 @@ def _create_chat_history_table_local():
         cur = conn.cursor()
         cur.execute(create_table_sql)
         conn.commit()
+        cur.close()
         return True
-    except mysql.connector.Error as err:
-        st.error(f"Error creating table: {err}")
-        conn.rollback()
+    except Exception as e:
+        print(f"Error creating table: {e}")
+        if conn:
+            conn.rollback()
         return False
     finally:
         if conn:
             conn.close()
 
 def _save_chat_entry_to_db_local(session_ts, user_name, user_email, user_mobile, question, assistant_answer):
-    """Save chat entry to database with mobile number"""
+    """Save chat entry to database with mobile number - CORRECTED parameter order"""
     insert_sql = """
     INSERT INTO chat_history (session_timestamp, user_name, user_email, user_mobile, user_question, assistant_answer)
     VALUES (%s, %s, %s, %s, %s, %s)
@@ -140,10 +142,12 @@ def _save_chat_entry_to_db_local(session_ts, user_name, user_email, user_mobile,
 
         cur.execute(insert_sql, (session_ts_dt, user_name, user_email, user_mobile, question, assistant_answer))
         conn.commit()
+        cur.close()
         return True
-    except mysql.connector.Error as err:
-        st.error(f"Database error: {err}")
-        conn.rollback()
+    except Exception as e:
+        print(f"Database save error: {e}")
+        if conn:
+            conn.rollback()
         return False
     finally:
         if conn:
@@ -159,18 +163,16 @@ if save_chat_entry_to_db is None:
 # UTILITY FUNCTIONS
 # ============================================
 def validate_mobile_number(mobile):
-    """Validate mobile number with international format support"""
+    """Validate mobile number"""
     if not mobile:
         return False, "Mobile number is required"
     
     # Remove spaces, hyphens, and plus signs for validation
     clean_mobile = re.sub(r'[\s\-\+\(\)]', '', mobile)
     
-    # Check if it contains only digits
     if not clean_mobile.isdigit():
         return False, "Mobile number should contain only digits, spaces, hyphens, or + sign"
     
-    # Check length (international mobile numbers are typically 7-15 digits)
     if len(clean_mobile) < 7 or len(clean_mobile) > 15:
         return False, "Mobile number should be between 7-15 digits"
     
@@ -207,12 +209,10 @@ def create_vector_db():
     try:
         df = pd.read_excel(DATASET_PATH)
         
-        # Validate required columns
         if 'prompt' not in df.columns or 'response' not in df.columns:
             st.error("Dataset must have 'prompt' and 'response' columns.")
             return None
             
-        # Remove empty rows
         df = df.dropna(subset=['prompt', 'response'])
         
         if len(df) == 0:
@@ -232,8 +232,7 @@ def create_vector_db():
         text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         texts = text_splitter.split_documents(documents)
         
-        # Use updated embeddings if available, fallback to old version
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
         vectorstore = FAISS.from_documents(texts, embeddings)
         vectorstore.save_local(VECTOR_DB_PATH)
         
@@ -247,7 +246,7 @@ def create_vector_db():
 def get_vectorstore():
     """Get or create vectorstore"""
     try:
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
         
         if not os.path.exists(VECTOR_DB_PATH):
             st.warning("Knowledgebase not found. Creating from dataset...")
@@ -260,7 +259,7 @@ def get_vectorstore():
         return None
 
 def get_qa_chain(llm):
-    """Create QA chain using available LangChain components"""
+    """Create QA chain using stable LangChain components"""
     vectorstore = get_vectorstore()
     if vectorstore is None:
         st.error("Could not load or create knowledgebase.")
@@ -274,30 +273,25 @@ def get_qa_chain(llm):
         
         prompt = PromptTemplate.from_template(PROMPT_TEMPLATE)
         
-        if USE_NEW_LANGCHAIN:
-            # Use new LangChain approach (no deprecation warnings)
-            document_chain = create_stuff_documents_chain(llm, prompt)
-            retrieval_chain = create_retrieval_chain(retriever, document_chain)
-            return retrieval_chain
-        else:
-            # Fallback to old approach
-            llm_chain = LLMChain(llm=llm, prompt=prompt)
-            stuff_chain = StuffDocumentsChain(
-                llm_chain=llm_chain,
-                document_variable_name="context"
-            )
-            return RetrievalQA(
-                retriever=retriever,
-                combine_documents_chain=stuff_chain,
-                return_source_documents=False
-            )
+        # Use stable LangChain components
+        llm_chain = LLMChain(llm=llm, prompt=prompt)
+        stuff_chain = StuffDocumentsChain(
+            llm_chain=llm_chain,
+            document_variable_name="context"
+        )
+        
+        return RetrievalQA(
+            retriever=retriever,
+            combine_documents_chain=stuff_chain,
+            return_source_documents=False
+        )
         
     except Exception as e:
         st.error(f"Error creating QA chain: {e}")
         return None
 
 def determine_llm(question: str):
-    """Determine which LLM to use based on question content"""
+    """Determine which LLM to use"""
     grok_keywords = ["grok", "xai", "x-ai", "grok model", "grok chat"]
     if any(word in question.lower() for word in grok_keywords) and ChatXAI and GROK_API_KEY:
         return "grok"
@@ -335,8 +329,8 @@ def initialize_llm(llm_choice):
                     temperature=0.3,
                     google_api_key=GOOGLE_API_KEY,
                 ), "gemini"
-            except Exception as fallback_e:
-                st.error(f"Fallback to Gemini also failed: {fallback_e}")
+            except Exception:
+                pass
                 
     return None, llm_choice
 
@@ -376,7 +370,6 @@ def run_app():
     db_configured = all([MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD])
     if not db_configured:
         st.warning("⚠️ Database not configured. Chat history will not be saved.")
-        st.info("Railway MySQL environment variables are required for chat history.")
 
     # User information collection with mobile number
     if not st.session_state.user_info_collected:
@@ -388,20 +381,17 @@ def run_app():
             with col1:
                 name = st.text_input(
                     "Full Name*", 
-                    placeholder="Enter your full name",
-                    help="Your full name for personalized assistance"
+                    placeholder="Enter your full name"
                 )
                 email = st.text_input(
                     "Email Address*", 
-                    placeholder="your.email@example.com",
-                    help="We'll use this for follow-ups if needed"
+                    placeholder="your.email@example.com"
                 )
             
             with col2:
                 mobile = st.text_input(
                     "Mobile Number*", 
-                    placeholder="+1234567890 or 1234567890",
-                    help="Include country code for international numbers"
+                    placeholder="+1234567890 or 1234567890"
                 )
                 st.markdown("*All fields are required")
             
@@ -420,7 +410,6 @@ def run_app():
                 elif not mobile_valid:
                     st.error(f"❌ {mobile_msg}")
                 else:
-                    # All validations passed
                     st.session_state.user_name = name.strip()
                     st.session_state.user_email = email.strip().lower()
                     st.session_state.user_mobile = mobile.strip()
@@ -437,11 +426,6 @@ def run_app():
             st.write(f"**Email:** {st.session_state.user_email}")
             st.write(f"**Mobile:** {st.session_state.user_mobile}")
             st.write(f"**Session:** {st.session_state.session_timestamp}")
-            
-            if st.button("🔄 Reset Session", help="Clear chat history and start over"):
-                for key in st.session_state.keys():
-                    del st.session_state[key]
-                st.rerun()
         
         st.success(f"👋 Welcome, {st.session_state.user_name}!")
         
@@ -465,8 +449,8 @@ def run_app():
                 if qa_chain:
                     with st.spinner(f"🧠 Using {actual_choice.title()} to find the best answer..."):
                         try:
-                            response = qa_chain.invoke({"input" if USE_NEW_LANGCHAIN else "query": question})
-                            answer = response.get("answer" if USE_NEW_LANGCHAIN else "result", "I couldn't generate a proper response.")
+                            response = qa_chain.invoke({"query": question})
+                            answer = response.get("result", "I couldn't generate a proper response.")
                         except Exception as e:
                             answer = f"An error occurred while processing: {str(e)}"
                             st.error(f"Processing error: {e}")
@@ -478,27 +462,27 @@ def run_app():
             # Add assistant response to chat history
             st.session_state.chat_history.append(("assistant", answer))
 
-            # Save to database if configured
+            # Save to database if configured - CORRECTED PARAMETER ORDER
             if db_configured:
                 try:
                     saved = save_chat_entry_to_db(
-                        st.session_state.session_timestamp,
-                        st.session_state.user_name,
-                        st.session_state.user_email,
-                        st.session_state.user_mobile,  # Mobile number included
-                        question,
-                        answer
+                        st.session_state.session_timestamp,     # session_timestamp
+                        st.session_state.user_name,            # user_name
+                        st.session_state.user_email,           # user_email
+                        st.session_state.user_mobile,          # user_mobile
+                        question,                               # user_question
+                        answer                                  # assistant_answer
                     )
                     if saved:
-                        st.success("💾 Chat saved to database", icon="✅")
+                        st.success("💾 Chat saved successfully!", icon="✅")
                     else:
                         st.warning("⚠️ Failed to save chat to database.")
                 except Exception as e:
                     st.error(f"Database error: {e}")
+                    print(f"Database save error: {e}")
 
         # Display chat history
         if st.session_state.chat_history:
-            st.subheader("💬 Chat History")
             for sender, text in st.session_state.chat_history:
                 with st.chat_message(sender):
                     st.markdown(text)
@@ -519,7 +503,7 @@ def main():
         
         # Check for dataset
         if not os.path.exists(DATASET_PATH):
-            print(f"Warning: {DATASET_PATH} not found. Create this file with 'prompt' and 'response' columns.")
+            print(f"Warning: {DATASET_PATH} not found. Upload this file with 'prompt' and 'response' columns.")
         
         # Run the app
         run_app()
