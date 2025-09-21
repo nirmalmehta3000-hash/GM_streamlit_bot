@@ -1,32 +1,27 @@
-streamlit
-jupyter
-pandas
-numpy
-requests
-# Core web framework
-streamlit
+# Core Streamlit and web framework
+streamlit>=1.28.0
+pandas>=1.5.0
+openpyxl>=3.0.10
 
 # LangChain ecosystem
-langchain
-langchain-community
-langchain-core
-langchain-google-genai
-langchain-xai
+langchain>=0.1.0
+langchain-community>=0.0.20
+langchain-core>=0.1.0
+langchain-google-genai>=1.0.0
+langchain-xai>=0.1.0
 
-# Embeddings and Vector DB
-faiss-cpu
-sentence-transformers
+# Try to use new embeddings, fallback to old
+langchain-huggingface>=0.0.1
 
-# File handling and environment
-openpyxl
-python-dotenv
-pandas
+# Vector database and embeddings
+faiss-cpu>=1.7.4
+sentence-transformers>=2.2.2
 
-# For tunneling (optional in Railway, remove if not needed)
+# Database for Railway
+mysql-connector-python>=8.0.33
+
+# Utilities
+python-dotenv>=1.0.0
+
+# For tunneling (remove if not using ngrok)
 pyngrok
-
-# Other essentials
-tiktoken
-
-# Added missing requirement
-mysql-connector-python
