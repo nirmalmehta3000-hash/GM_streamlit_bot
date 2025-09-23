@@ -390,8 +390,10 @@ def get_user_stats(user_id):
 def save_chat_entry_to_db(session_timestamp, user_name, user_email, user_mobile, user_question, assistant_answer):
     """
     Insert chat entry with mobile number and user_id reference.
-    Updated to include user_id lookup and foreign key relationship.
+    Updated with better error handling and debugging.
     """
+    logger.info(f"Starting save_chat_entry_to_db for email: {user_email}")
+    
     conn = get_db_connection()
     if not conn:
         logger.warning("Cannot save chat entry - no database connection")
@@ -401,21 +403,47 @@ def save_chat_entry_to_db(session_timestamp, user_name, user_email, user_mobile,
     try:
         cur = conn.cursor()
         
-        # Get user_id from email
-        user_id = None
+        # Get user_id from email with detailed logging
+        logger.info(f"Looking up user_id for email: {user_email}")
         cur.execute("SELECT user_id FROM users WHERE email = %s", (user_email,))
         result = cur.fetchone()
+        
+        user_id = None
         if result:
             user_id = result[0]
+            logger.info(f"Found user_id: {user_id}")
+        else:
+            logger.warning(f"No user found for email: {user_email}")
+            # Check if any users exist
+            cur.execute("SELECT COUNT(*) FROM users")
+            user_count = cur.fetchone()[0]
+            logger.info(f"Total users in database: {user_count}")
+            
+            # List all users for debugging
+            cur.execute("SELECT email, user_id FROM users")
+            all_users = cur.fetchall()
+            logger.info(f"All users in DB: {all_users}")
         
         # Handle timestamp
         if isinstance(session_timestamp, str):
             try:
                 ts = datetime.strptime(session_timestamp, "%Y-%m-%d %H:%M:%S")
-            except Exception:
+                logger.info(f"Parsed timestamp: {ts}")
+            except Exception as e:
+                logger.warning(f"Failed to parse timestamp '{session_timestamp}': {e}")
                 ts = datetime.now()
         else:
             ts = session_timestamp or datetime.now()
+
+        # Log data being inserted
+        logger.info(f"Inserting chat data:")
+        logger.info(f"  - session_timestamp: {ts}")
+        logger.info(f"  - user_id: {user_id}")
+        logger.info(f"  - user_name: {user_name}")
+        logger.info(f"  - user_email: {user_email}")
+        logger.info(f"  - user_mobile: {user_mobile}")
+        logger.info(f"  - question length: {len(user_question) if user_question else 0}")
+        logger.info(f"  - answer length: {len(assistant_answer) if assistant_answer else 0}")
 
         # Insert chat entry
         insert_sql = """
@@ -425,12 +453,29 @@ def save_chat_entry_to_db(session_timestamp, user_name, user_email, user_mobile,
         """
         
         cur.execute(insert_sql, (ts, user_id, user_name, user_email, user_mobile, user_question, assistant_answer))
-        conn.commit()
-        logger.info(f"Chat entry saved for user: {user_email} (ID: {user_id})")
-        return True
+        
+        # Check if the insert actually inserted a row
+        if cur.rowcount > 0:
+            conn.commit()
+            logger.info(f"Chat entry saved successfully for user: {user_email} (ID: {user_id})")
+            return True
+        else:
+            logger.warning("No rows were inserted")
+            conn.rollback()
+            return False
             
     except Error as err:
-        logger.exception("Error inserting chat entry: %s", err)
+        logger.exception(f"MySQL Error inserting chat entry: {err}")
+        logger.error(f"Error code: {err.errno}")
+        logger.error(f"SQL state: {err.sqlstate}")
+        logger.error(f"Error message: {err.msg}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    except Exception as e:
+        logger.exception(f"General error inserting chat entry: {e}")
         try:
             conn.rollback()
         except Exception:
