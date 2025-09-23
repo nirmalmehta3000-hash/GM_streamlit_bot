@@ -2,10 +2,8 @@ import streamlit as st
 import os
 import pandas as pd
 from datetime import datetime
-import mysql.connector
 import re
 import uuid
-import hashlib
 
 # LangChain imports - using stable versions to avoid errors
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -18,12 +16,24 @@ from langchain_core.prompts import PromptTemplate
 from langchain.chains.llm import LLMChain
 from langchain.chains.combine_documents.stuff import StuffDocumentsChain
 
-# Try importing user db_utils; fallback to local functions
+# Import database utilities - now using external db_utils.py
 try:
-    from db_utils import create_chat_history_table, save_chat_entry_to_db
-except Exception:
-    create_chat_history_table = None
-    save_chat_entry_to_db = None
+    from db_utils import (
+        initialize_all_tables,
+        test_connection,
+        create_or_get_user,
+        create_user_session,
+        save_chat_entry_to_db,
+        get_user_chat_history,
+        get_user_stats,
+        get_database_info
+    )
+    DB_UTILS_AVAILABLE = True
+    print("✅ Successfully imported db_utils module")
+except ImportError as e:
+    DB_UTILS_AVAILABLE = False
+    st.error(f"❌ Could not import db_utils: {e}")
+    st.error("Please ensure db_utils.py is in the same directory as app.py")
 
 # Import Grok if available
 try:
@@ -34,13 +44,6 @@ except ImportError:
 # API Keys
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GROK_API_KEY = os.environ.get("GROK_API_KEY")
-
-# Database credentials (Railway format)
-MYSQL_HOST = os.environ.get("MYSQLHOST")
-MYSQL_DATABASE = os.environ.get("MYSQLDATABASE") 
-MYSQL_USER = os.environ.get("MYSQLUSER")
-MYSQL_PASSWORD = os.environ.get("MYSQLPASSWORD")
-MYSQL_PORT = int(os.environ.get("MYSQLPORT", 3306))
 
 VECTOR_DB_PATH = "vectorstore.faiss"
 DATASET_PATH = "dataset.xlsx"
@@ -64,361 +67,6 @@ If you don't know the answer, just say so honestly and avoid guessing.
 Question: {question}
 Expert Answer:
 """
-
-# ============================================
-# DATABASE HELPERS
-# ============================================
-def get_db_connection():
-    """Get database connection with proper error handling"""
-    if not all([MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD]):
-        return None
-    
-    try:
-        return mysql.connector.connect(
-            host=MYSQL_HOST,
-            port=MYSQL_PORT,
-            user=MYSQL_USER,
-            password=MYSQL_PASSWORD,
-            database=MYSQL_DATABASE,
-            charset='utf8mb4',
-            autocommit=False
-        )
-    except mysql.connector.Error as err:
-        st.error(f"Database connection failed: {err}")
-        return None
-
-def create_users_table():
-    """Create users table for storing user information"""
-    create_table_sql = """
-    CREATE TABLE IF NOT EXISTS users (
-        user_id VARCHAR(50) PRIMARY KEY,
-        full_name VARCHAR(200) NOT NULL,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        mobile VARCHAR(20),
-        username VARCHAR(100) UNIQUE,
-        password_hash VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        last_login TIMESTAMP NULL,
-        is_active BOOLEAN DEFAULT TRUE,
-        profile_data JSON,
-        INDEX idx_email (email),
-        INDEX idx_username (username),
-        INDEX idx_mobile (mobile)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """
-    
-    conn = get_db_connection()
-    if not conn:
-        return False
-        
-    try:
-        cur = conn.cursor()
-        cur.execute(create_table_sql)
-        conn.commit()
-        cur.close()
-        print("✅ Users table created/verified successfully")
-        return True
-    except Exception as e:
-        print(f"Error creating users table: {e}")
-        if conn:
-            conn.rollback()
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-def create_user_sessions_table():
-    """Create user_sessions table for tracking user login sessions"""
-    create_table_sql = """
-    CREATE TABLE IF NOT EXISTS user_sessions (
-        session_id VARCHAR(50) PRIMARY KEY,
-        user_id VARCHAR(50) NOT NULL,
-        session_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        session_end TIMESTAMP NULL,
-        is_active BOOLEAN DEFAULT TRUE,
-        ip_address VARCHAR(45),
-        user_agent TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-        INDEX idx_user_id (user_id),
-        INDEX idx_session_start (session_start)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """
-    
-    conn = get_db_connection()
-    if not conn:
-        return False
-        
-    try:
-        cur = conn.cursor()
-        cur.execute(create_table_sql)
-        conn.commit()
-        cur.close()
-        print("✅ User sessions table created/verified successfully")
-        return True
-    except Exception as e:
-        print(f"Error creating user_sessions table: {e}")
-        if conn:
-            conn.rollback()
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-def _create_chat_history_table_local():
-    """Create chat_history table with user_id reference"""
-    create_table_sql = """
-    CREATE TABLE IF NOT EXISTS chat_history (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        session_timestamp DATETIME,
-        user_id VARCHAR(50),
-        user_name VARCHAR(255),
-        user_email VARCHAR(255),
-        user_mobile VARCHAR(20),
-        user_question TEXT,
-        assistant_answer LONGTEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL,
-        INDEX idx_user_id (user_id),
-        INDEX idx_session_timestamp (session_timestamp)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """
-    
-    conn = get_db_connection()
-    if not conn:
-        return False
-        
-    try:
-        cur = conn.cursor()
-        cur.execute(create_table_sql)
-        conn.commit()
-        cur.close()
-        return True
-    except Exception as e:
-        print(f"Error creating chat_history table: {e}")
-        if conn:
-            conn.rollback()
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-def create_or_get_user(full_name, email, mobile):
-    """Create new user or get existing user by email"""
-    conn = get_db_connection()
-    if not conn:
-        return None
-        
-    try:
-        cur = conn.cursor()
-        
-        # First, try to get existing user by email
-        select_sql = "SELECT user_id, full_name, email, mobile, last_login FROM users WHERE email = %s"
-        cur.execute(select_sql, (email,))
-        user = cur.fetchone()
-        
-        if user:
-            # Update last login and mobile if changed
-            user_id = user[0]
-            update_sql = """
-            UPDATE users 
-            SET last_login = NOW(), mobile = %s, updated_at = NOW()
-            WHERE user_id = %s
-            """
-            cur.execute(update_sql, (mobile, user_id))
-            conn.commit()
-            
-            cur.close()
-            return {
-                'user_id': user[0],
-                'full_name': user[1],
-                'email': user[2],
-                'mobile': mobile,  # Use updated mobile
-                'last_login': user[4],
-                'is_new': False
-            }
-        else:
-            # Create new user
-            user_id = str(uuid.uuid4())
-            insert_sql = """
-            INSERT INTO users (user_id, full_name, email, mobile, last_login)
-            VALUES (%s, %s, %s, %s, NOW())
-            """
-            cur.execute(insert_sql, (user_id, full_name, email, mobile))
-            conn.commit()
-            
-            cur.close()
-            return {
-                'user_id': user_id,
-                'full_name': full_name,
-                'email': email,
-                'mobile': mobile,
-                'last_login': datetime.now(),
-                'is_new': True
-            }
-            
-    except Exception as e:
-        print(f"Error in create_or_get_user: {e}")
-        if conn:
-            conn.rollback()
-        return None
-    finally:
-        if conn:
-            conn.close()
-
-def create_user_session(user_id):
-    """Create a new user session record"""
-    conn = get_db_connection()
-    if not conn:
-        return None
-        
-    try:
-        cur = conn.cursor()
-        session_id = str(uuid.uuid4())
-        
-        insert_sql = """
-        INSERT INTO user_sessions (session_id, user_id)
-        VALUES (%s, %s)
-        """
-        cur.execute(insert_sql, (session_id, user_id))
-        conn.commit()
-        cur.close()
-        return session_id
-        
-    except Exception as e:
-        print(f"Error creating user session: {e}")
-        if conn:
-            conn.rollback()
-        return None
-    finally:
-        if conn:
-            conn.close()
-
-def _save_chat_entry_to_db_local(session_ts, user_name, user_email, user_mobile, question, assistant_answer):
-    """Save chat entry to database with user_id reference"""
-    # Get user_id from email
-    user_id = None
-    conn = get_db_connection()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT user_id FROM users WHERE email = %s", (user_email,))
-            result = cur.fetchone()
-            if result:
-                user_id = result[0]
-            cur.close()
-        except Exception as e:
-            print(f"Error getting user_id: {e}")
-        finally:
-            conn.close()
-    
-    # Insert chat entry
-    insert_sql = """
-    INSERT INTO chat_history (session_timestamp, user_id, user_name, user_email, user_mobile, user_question, assistant_answer)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """
-    
-    conn = get_db_connection()
-    if not conn:
-        return False
-        
-    try:
-        cur = conn.cursor()
-        if isinstance(session_ts, str):
-            try:
-                session_ts_dt = datetime.strptime(session_ts, "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                session_ts_dt = datetime.now()
-        else:
-            session_ts_dt = session_ts or datetime.now()
-
-        cur.execute(insert_sql, (session_ts_dt, user_id, user_name, user_email, user_mobile, question, assistant_answer))
-        conn.commit()
-        cur.close()
-        return True
-    except Exception as e:
-        print(f"Database save error: {e}")
-        if conn:
-            conn.rollback()
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-def get_user_chat_history(user_id, limit=50):
-    """Get chat history for a specific user"""
-    conn = get_db_connection()
-    if not conn:
-        return []
-        
-    try:
-        cur = conn.cursor()
-        select_sql = """
-        SELECT user_question, assistant_answer, created_at 
-        FROM chat_history 
-        WHERE user_id = %s 
-        ORDER BY created_at DESC 
-        LIMIT %s
-        """
-        cur.execute(select_sql, (user_id, limit))
-        rows = cur.fetchall()
-        cur.close()
-        
-        return [{
-            'question': row[0],
-            'answer': row[1],
-            'timestamp': row[2]
-        } for row in rows]
-        
-    except Exception as e:
-        print(f"Error getting user chat history: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-def get_user_stats(user_id):
-    """Get user statistics"""
-    conn = get_db_connection()
-    if not conn:
-        return {}
-        
-    try:
-        cur = conn.cursor()
-        
-        # Get total chats
-        cur.execute("SELECT COUNT(*) FROM chat_history WHERE user_id = %s", (user_id,))
-        total_chats = cur.fetchone()[0]
-        
-        # Get first chat date
-        cur.execute("SELECT MIN(created_at) FROM chat_history WHERE user_id = %s", (user_id,))
-        first_chat = cur.fetchone()[0]
-        
-        # Get last chat date
-        cur.execute("SELECT MAX(created_at) FROM chat_history WHERE user_id = %s", (user_id,))
-        last_chat = cur.fetchone()[0]
-        
-        cur.close()
-        
-        return {
-            'total_chats': total_chats,
-            'first_chat': first_chat,
-            'last_chat': last_chat
-        }
-        
-    except Exception as e:
-        print(f"Error getting user stats: {e}")
-        return {}
-    finally:
-        if conn:
-            conn.close()
-
-# Use local functions if db_utils not provided
-if create_chat_history_table is None:
-    create_chat_history_table = _create_chat_history_table_local
-if save_chat_entry_to_db is None:
-    save_chat_entry_to_db = _save_chat_entry_to_db_local
 
 # ============================================
 # UTILITY FUNCTIONS
@@ -612,6 +260,34 @@ def initialize_session_state():
         if key not in st.session_state:
             st.session_state[key] = value
 
+def check_database_status():
+    """Check database connection and display status"""
+    if not DB_UTILS_AVAILABLE:
+        return False
+    
+    try:
+        if test_connection():
+            st.sidebar.success("🟢 Database Connected")
+            
+            # Show database info
+            db_info = get_database_info()
+            if db_info:
+                st.sidebar.text(f"Database: {db_info.get('database', 'N/A')}")
+                st.sidebar.text(f"Tables: {db_info.get('total_tables', 0)}")
+                
+                # Show table counts
+                if 'tables' in db_info:
+                    for table, count in db_info['tables'].items():
+                        st.sidebar.text(f"  {table}: {count} records")
+            
+            return True
+        else:
+            st.sidebar.error("🔴 Database Connection Failed")
+            return False
+    except Exception as e:
+        st.sidebar.error(f"🔴 Database Error: {str(e)[:50]}...")
+        return False
+
 def run_app():
     """Main Streamlit application"""
     st.set_page_config(
@@ -626,10 +302,11 @@ def run_app():
     # Initialize session state
     initialize_session_state()
     
-    # Check database configuration
-    db_configured = all([MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD])
-    if not db_configured:
-        st.warning("⚠️ Database not configured. Chat history will not be saved.")
+    # Check database status
+    db_available = check_database_status()
+    
+    if not db_available:
+        st.warning("⚠️ Database not available. Chat history will not be saved.")
 
     # User information collection
     if not st.session_state.user_info_collected:
@@ -671,7 +348,7 @@ def run_app():
                     st.error(f"❌ {mobile_msg}")
                 else:
                     # Create or get user from database
-                    if db_configured:
+                    if db_available:
                         user_data = create_or_get_user(name.strip(), email.strip().lower(), mobile.strip())
                         if user_data:
                             st.session_state.user_data = user_data
@@ -713,7 +390,7 @@ def run_app():
             st.write(f"**Mobile:** {user_data['mobile']}")
             st.write(f"**Session:** {st.session_state.session_timestamp}")
             
-            if db_configured:
+            if db_available:
                 # Show user stats
                 user_stats = get_user_stats(user_data['user_id'])
                 if user_stats:
@@ -770,8 +447,8 @@ def run_app():
             # Add assistant response to chat history
             st.session_state.chat_history.append(("assistant", answer))
 
-            # Save to database if configured
-            if db_configured:
+            # Save to database if available
+            if db_available:
                 try:
                     saved = save_chat_entry_to_db(
                         st.session_state.session_timestamp,
@@ -801,25 +478,15 @@ def run_app():
 def main():
     """Main function to run the app"""
     try:
-        # Initialize database tables if configured
-        if all([MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD]):
-            # Create users table
-            users_created = create_users_table()
-            if users_created:
-                print("✅ Users table initialized successfully")
-            
-            # Create user sessions table
-            sessions_created = create_user_sessions_table()
-            if sessions_created:
-                print("✅ User sessions table initialized successfully")
-            
-            # Create chat history table (updated with user_id reference)
-            chat_created = create_chat_history_table()
-            if chat_created:
-                print("✅ Chat history table initialized successfully")
-            
-            if not (users_created and sessions_created and chat_created):
+        # Initialize database tables if db_utils is available
+        if DB_UTILS_AVAILABLE:
+            print("🔄 Initializing database tables...")
+            if initialize_all_tables():
+                print("✅ All database tables initialized successfully")
+            else:
                 print("⚠️ Some database tables failed to initialize")
+        else:
+            print("⚠️ db_utils module not available - running without database")
         
         # Check for dataset
         if not os.path.exists(DATASET_PATH):
