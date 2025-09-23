@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime
 import re
 import uuid
+import traceback
 
 # LangChain imports - using stable versions to avoid errors
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -26,7 +27,8 @@ try:
         save_chat_entry_to_db,
         get_user_chat_history,
         get_user_stats,
-        get_database_info
+        get_database_info,
+        get_db_connection
     )
     DB_UTILS_AVAILABLE = True
     print("✅ Successfully imported db_utils module")
@@ -67,6 +69,75 @@ If you don't know the answer, just say so honestly and avoid guessing.
 Question: {question}
 Expert Answer:
 """
+
+# ============================================
+# DEBUG FUNCTIONS
+# ============================================
+def debug_database_connection():
+    """Debug database connection and table structure"""
+    if not DB_UTILS_AVAILABLE:
+        return False, "db_utils not available"
+    
+    try:
+        # Test basic connection
+        conn = get_db_connection()
+        if not conn:
+            return False, "Could not establish database connection"
+        
+        # Test tables exist
+        cur = conn.cursor()
+        cur.execute("SHOW TABLES")
+        tables = [row[0] for row in cur.fetchall()]
+        
+        required_tables = ['users', 'chat_history', 'user_sessions']
+        missing_tables = [t for t in required_tables if t not in tables]
+        
+        if missing_tables:
+            cur.close()
+            conn.close()
+            return False, f"Missing tables: {missing_tables}"
+        
+        # Test chat_history table structure
+        cur.execute("DESCRIBE chat_history")
+        columns = [row[0] for row in cur.fetchall()]
+        
+        required_columns = ['user_question', 'assistant_answer', 'user_id', 'user_name', 'user_email']
+        missing_columns = [c for c in required_columns if c not in columns]
+        
+        cur.close()
+        conn.close()
+        
+        if missing_columns:
+            return False, f"Missing columns in chat_history: {missing_columns}"
+        
+        return True, "Database structure OK"
+        
+    except Exception as e:
+        return False, f"Database debug error: {str(e)}"
+
+def test_chat_save(user_data):
+    """Test saving a chat entry"""
+    if not DB_UTILS_AVAILABLE:
+        return False, "db_utils not available"
+    
+    try:
+        test_question = "Test question"
+        test_answer = "Test answer"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        result = save_chat_entry_to_db(
+            timestamp,
+            user_data['full_name'],
+            user_data['email'],
+            user_data['mobile'],
+            test_question,
+            test_answer
+        )
+        
+        return result, "Test completed"
+        
+    except Exception as e:
+        return False, f"Test save error: {str(e)}"
 
 # ============================================
 # UTILITY FUNCTIONS
@@ -253,7 +324,8 @@ def initialize_session_state():
         "user_info_collected": False,
         "user_data": None,
         "session_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "user_session_id": None
+        "user_session_id": None,
+        "debug_mode": False
     }
     
     for key, value in defaults.items():
@@ -302,8 +374,25 @@ def run_app():
     # Initialize session state
     initialize_session_state()
     
+    # Add debug toggle
+    if st.sidebar.checkbox("Debug Mode"):
+        st.session_state.debug_mode = True
+    
     # Check database status
     db_available = check_database_status()
+    
+    # Show debug info if enabled
+    if st.session_state.debug_mode:
+        st.sidebar.subheader("🔍 Debug Information")
+        
+        if DB_UTILS_AVAILABLE:
+            db_ok, db_msg = debug_database_connection()
+            if db_ok:
+                st.sidebar.success(f"✅ {db_msg}")
+            else:
+                st.sidebar.error(f"❌ {db_msg}")
+        else:
+            st.sidebar.error("❌ db_utils module not available")
     
     if not db_available:
         st.warning("⚠️ Database not available. Chat history will not be saved.")
@@ -349,22 +438,35 @@ def run_app():
                 else:
                     # Create or get user from database
                     if db_available:
-                        user_data = create_or_get_user(name.strip(), email.strip().lower(), mobile.strip())
-                        if user_data:
-                            st.session_state.user_data = user_data
-                            st.session_state.user_info_collected = True
-                            
-                            # Create user session
-                            session_id = create_user_session(user_data['user_id'])
-                            st.session_state.user_session_id = session_id
-                            
-                            if user_data['is_new']:
-                                st.success(f"✅ Welcome aboard, {user_data['full_name']}! Your account has been created.")
+                        try:
+                            user_data = create_or_get_user(name.strip(), email.strip().lower(), mobile.strip())
+                            if user_data:
+                                st.session_state.user_data = user_data
+                                st.session_state.user_info_collected = True
+                                
+                                # Create user session
+                                session_id = create_user_session(user_data['user_id'])
+                                st.session_state.user_session_id = session_id
+                                
+                                # Test chat save in debug mode
+                                if st.session_state.debug_mode:
+                                    test_ok, test_msg = test_chat_save(user_data)
+                                    if test_ok:
+                                        st.success(f"✅ Database test passed: {test_msg}")
+                                    else:
+                                        st.error(f"❌ Database test failed: {test_msg}")
+                                
+                                if user_data['is_new']:
+                                    st.success(f"✅ Welcome aboard, {user_data['full_name']}! Your account has been created.")
+                                else:
+                                    st.success(f"✅ Welcome back, {user_data['full_name']}! Great to see you again.")
+                                st.rerun()
                             else:
-                                st.success(f"✅ Welcome back, {user_data['full_name']}! Great to see you again.")
-                            st.rerun()
-                        else:
-                            st.error("❌ Failed to create/retrieve user account. Please try again.")
+                                st.error("❌ Failed to create/retrieve user account. Please try again.")
+                        except Exception as e:
+                            st.error(f"❌ Database error during user creation: {str(e)}")
+                            if st.session_state.debug_mode:
+                                st.error(f"Full error: {traceback.format_exc()}")
                     else:
                         # Fallback for non-DB mode
                         st.session_state.user_data = {
@@ -450,6 +552,11 @@ def run_app():
             # Save to database if available
             if db_available:
                 try:
+                    if st.session_state.debug_mode:
+                        st.info(f"Attempting to save chat for user: {user_data['user_id']}")
+                        st.info(f"Question length: {len(question)} chars")
+                        st.info(f"Answer length: {len(answer)} chars")
+                    
                     saved = save_chat_entry_to_db(
                         st.session_state.session_timestamp,
                         user_data['full_name'],
@@ -458,12 +565,18 @@ def run_app():
                         question,
                         answer
                     )
+                    
                     if saved:
                         st.success("💾 Chat saved successfully!", icon="✅")
                     else:
                         st.warning("⚠️ Failed to save chat to database.")
+                        if st.session_state.debug_mode:
+                            st.error("save_chat_entry_to_db returned False")
+                            
                 except Exception as e:
-                    st.error(f"Database error: {e}")
+                    st.error(f"Database error: {str(e)}")
+                    if st.session_state.debug_mode:
+                        st.error(f"Full traceback: {traceback.format_exc()}")
                     print(f"Database save error: {e}")
 
         # Display chat history
